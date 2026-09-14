@@ -50,5 +50,7 @@ button { cursor: pointer; }
 .course-code { font-size: .64rem; font-weight: 800; letter-spacing: .08em; color: var(--course); }
 .assignment-card h3 { font-size: .84rem; font-weight: 800; line-height: 1.2; color: #263354; }
 .assignment-card p { margin-top: .25rem; font-size: .7rem; font-weight: 600; color: #7b849b; }
+.review-row { display: grid; grid-template-columns: auto minmax(180px,1fr) 150px 112px; align-items: center; gap: .55rem; border: 1px solid #e1e5ee; border-radius: .8rem; background: #fafbfe; padding: .55rem; }
 @media (max-width: 1023px) { .course-filter { padding-right: 1rem; } }
+@media (max-width: 640px) { .review-row { grid-template-columns: auto minmax(0,1fr); } .review-row > :nth-child(3), .review-row > :nth-child(4) { grid-column: 2; width: 100%; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
