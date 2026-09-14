@@ -71,7 +71,7 @@ function inferCourse(text: string, sourceName = "") {
   const courseCode = codeMatch ? `${codeMatch[1].toUpperCase()} ${codeMatch[2].toUpperCase()}` : "";
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 20);
   const nameLine = lines.find((line) => courseCode && line.toUpperCase().includes(courseCode)) || lines.find((line) => /syllabus|schedule/i.test(line) && line.length < 120) || lines.find((line) => line.length > 8 && line.length < 90) || "";
-  const courseName = nameLine.replace(/\b(?:fall|spring|summer)\s+20\d{2}\b/ig, "").replace(/\bsyllabus\b/ig, "").replace(courseCode, "").replace(/[|_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const courseName = nameLine.replace(/\b(?:fall|spring|summer)\s+20\d{2}\b/ig, "").replace(/\b(?:syllabus|schedule)\b/ig, "").replace(courseCode, "").replace(/[|_-]+/g, " ").replace(/\s+/g, " ").trim();
   return { courseCode, courseName };
 }
 
@@ -83,6 +83,12 @@ export function parseScheduleText(text: string, sourceName = "", fallbackYear = 
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
+    if (line.startsWith("COURSEFLOW_DUE\t")) {
+      const [, dueDate, ...titleParts] = line.split("\t");
+      const title = titleParts.join(" ").trim();
+      if (dueDate && title) candidates.push({ title, dueDate });
+      continue;
+    }
     const date = findDate(line, fallbackYear);
     if (date) currentDate = date;
     if (!assignmentWords.test(line)) continue;

@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Difficulty, parseScheduleText, ParsedAssignment } from "@/lib/schedule-parser";
+import { spreadsheetRowsToSchedule } from "@/lib/spreadsheet-schedule";
 
 type Course = { id: string; code: string; name: string; color: string; soft: string; source: string };
 type AssignmentKind = "assignment" | "exam";
@@ -176,31 +177,12 @@ export default function Home() {
   async function readSpreadsheet(file: File) {
     const XLSX = await import("xlsx");
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
-    const lines: string[] = [];
+    const schedules: string[] = [];
     for (const sheetName of workbook.SheetNames) {
-      const rows = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets[sheetName], { header: 1, raw: false, dateNF: "mmmm d, yyyy" });
-      const headerIndex = rows.findIndex((row) => row.some((cell) => /^date$/i.test(String(cell || ""))) && row.some((cell) => /^due/i.test(String(cell || ""))));
-      const header = headerIndex >= 0 ? rows[headerIndex] : [];
-      const dateColumn = header.findIndex((cell) => /^date$/i.test(String(cell || "")));
-      const dueColumn = header.findIndex((cell) => /^due/i.test(String(cell || "")));
-      if (headerIndex >= 0 && dateColumn >= 0 && dueColumn >= 0) {
-        rows.slice(0, headerIndex).forEach((row) => lines.push(row.map((cell) => String(cell || "").trim()).filter(Boolean).join(" | ")));
-        for (let index = headerIndex + 1; index < rows.length; index++) {
-          const date = String(rows[index][dateColumn] || "").trim();
-          if (!date) continue;
-          const dueItems = String(rows[index][dueColumn] || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-          dueItems.forEach((item) => lines.push(`${date} | ${item} DUE`));
-          rows[index].forEach((cell, column) => {
-            const value = String(cell || "").trim();
-            if (column === dueColumn) return;
-            if (/\bdue\b/i.test(value) || (/^(?:exam|quiz|midterm)\s*#?\d+/i.test(value) && !/review|help/i.test(value))) lines.push(`${date} | ${value} DUE`);
-          });
-        }
-      } else {
-        rows.forEach((row) => { const values = row.map((cell) => String(cell || "").trim()).filter(Boolean); if (values.length) lines.push(values.join(" | ")); });
-      }
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: false, dateNF: "mmmm d, yyyy" });
+      schedules.push(spreadsheetRowsToSchedule(rows, 2026));
     }
-    return lines.join("\n");
+    return schedules.join("\n");
   }
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
