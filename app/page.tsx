@@ -1,7 +1,7 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowRight, BookOpen, CalendarDays, ChevronLeft, ChevronRight, CirclePlus, Clock3, FileSpreadsheet, FileText, Link2, Loader2, Sparkles, UploadCloud } from "lucide-react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ArrowRight, BookOpen, CalendarDays, ChevronLeft, ChevronRight, CirclePlus, Clock3, FileSpreadsheet, FileText, GripVertical, Link2, Loader2, Sparkles, Timer, Trophy, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -13,7 +13,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Difficulty, parseScheduleText, ParsedAssignment } from "@/lib/schedule-parser";
 
 type Course = { id: string; code: string; name: string; color: string; soft: string; source: string };
-type Assignment = { id: number; title: string; courseId: string; dueDate: string; difficulty: Difficulty; done?: boolean };
+type AssignmentKind = "assignment" | "exam";
+type Assignment = { id: number; title: string; courseId: string; dueDate: string; difficulty: Difficulty; kind?: AssignmentKind; done?: boolean };
+type PlannedSession = { id: string; assignment: Assignment; date: string; minutes: number; step: number; total: number; isDue: boolean };
 
 const palette = [
   { color: "#6b5cff", soft: "#eeeaff" }, { color: "#f07149", soft: "#fff0e9" },
@@ -27,7 +29,8 @@ const initialCourses: Course[] = [
   { id: "cs2261", code: "CS 2261", name: "Living Schedule", ...palette[2], source: "Excel schedule" },
 ];
 
-const make = (id: number, courseId: string, title: string, dueDate: string, difficulty: Difficulty): Assignment => ({ id, courseId, title, dueDate, difficulty });
+const inferKind = (title: string): AssignmentKind => /\b(exam|quiz|midterm|test)\b/i.test(title) ? "exam" : "assignment";
+const make = (id: number, courseId: string, title: string, dueDate: string, difficulty: Difficulty): Assignment => ({ id, courseId, title, dueDate, difficulty, kind: inferKind(title) });
 const initialAssignments: Assignment[] = [
   make(101, "cs4590", "Homework 1: A Simple Synthesizer", "2026-09-10", "medium"),
   make(102, "cs4590", "Homework 2: Shaping Sounds with LFOs and Envelopes", "2026-09-29", "hard"),
@@ -61,11 +64,25 @@ const initialAssignments: Assignment[] = [
 ];
 
 const leadDays: Record<Difficulty, number> = { easy: 2, medium: 4, hard: 7 };
-const effort: Record<Difficulty, string> = { easy: "30–60 min", medium: "1–2 hrs", hard: "3+ hrs" };
+const assignmentMinutes: Record<Difficulty, number> = { easy: 35, medium: 55, hard: 80 };
+const examLeadDays: Record<Difficulty, number> = { easy: 5, medium: 9, hard: 14 };
+const examSessionCount: Record<Difficulty, number> = { easy: 3, medium: 5, hard: 7 };
 function addDays(date: Date, days: number) { const result = new Date(date); result.setDate(result.getDate() + days); return result; }
 function daysBetween(from: Date, date: string) { return Math.round((new Date(`${date}T00:00:00`).getTime() - from.getTime()) / 86400000); }
 function dayLabel(date: Date) { return date.toLocaleDateString("en-US", { weekday: "short" }); }
 function dateLabel(date: Date) { return date.toLocaleDateString("en-US", { month: "short", day: "numeric" }); }
+function isoDate(date: Date) { return date.toISOString().slice(0, 10); }
+function formatMinutes(minutes: number) { return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} hr${minutes >= 120 ? "s" : ""}${minutes % 60 ? ` ${minutes % 60} min` : ""}`; }
+function spreadDates(start: Date, end: Date, count: number) {
+  const span = Math.max(0, Math.round((end.getTime() - start.getTime()) / 86400000));
+  if (count <= 1 || span === 0) return [isoDate(start)];
+  return Array.from(new Set(Array.from({ length: Math.min(count, span + 1) }, (_, index) => isoDate(addDays(start, Math.round((span * index) / (Math.min(count, span + 1) - 1)))))));
+}
+function defaultSessionDates(item: Assignment) {
+  const due = new Date(`${item.dueDate}T00:00:00`);
+  if ((item.kind || inferKind(item.title)) === "exam") return spreadDates(addDays(due, -examLeadDays[item.difficulty]), addDays(due, -1), examSessionCount[item.difficulty]);
+  return spreadDates(addDays(due, -leadDays[item.difficulty]), addDays(due, -1), leadDays[item.difficulty]);
+}
 
 export default function Home() {
   const [courses, setCourses] = useState<Course[]>(initialCourses);
@@ -83,22 +100,32 @@ export default function Home() {
   const [sourceName, setSourceName] = useState("");
   const [draftItems, setDraftItems] = useState<ParsedAssignment[]>([]);
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
+  const [assignmentKind, setAssignmentKind] = useState<AssignmentKind>("assignment");
   const [selectedCourse, setSelectedCourse] = useState(initialCourses[0].id);
+  const [sessionPlans, setSessionPlans] = useState<Record<string, string[]>>({});
+  const [draggedSession, setDraggedSession] = useState<{ assignmentId: number; date: string } | null>(null);
+  const [dropDay, setDropDay] = useState<string | null>(null);
   const today = useMemo(() => { const date = new Date(); date.setHours(0, 0, 0, 0); return date; }, []);
   const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => addDays(today, weekOffset * 7 + index)), [today, weekOffset]);
   const courseMap = useMemo(() => Object.fromEntries(courses.map((course) => [course.id, course])), [courses]);
   const visibleAssignments = assignments.filter((item) => activeCourse === "all" || item.courseId === activeCourse);
-  const scheduledByDay = weekDays.map((_, dayIndex) => {
-    const absoluteOffset = weekOffset * 7 + dayIndex;
-    return visibleAssignments.filter((item) => { const dueOffset = daysBetween(today, item.dueDate); return absoluteOffset >= dueOffset - leadDays[item.difficulty] && absoluteOffset <= dueOffset; });
-  });
+  const sessions = useMemo(() => visibleAssignments.flatMap((assignment) => {
+    const plan = sessionPlans[String(assignment.id)] || defaultSessionDates(assignment);
+    const work = plan.filter((date) => date < assignment.dueDate).sort();
+    const minutes = (assignment.kind || inferKind(assignment.title)) === "exam" ? assignmentMinutes[assignment.difficulty] : assignmentMinutes[assignment.difficulty];
+    const planned = work.map((date, index): PlannedSession => ({ id: `${assignment.id}:${date}`, assignment, date, minutes, step: index + 1, total: work.length, isDue: false }));
+    return [...planned, { id: `${assignment.id}:due`, assignment, date: assignment.dueDate, minutes: 0, step: work.length, total: work.length, isDue: true }];
+  }), [visibleAssignments, sessionPlans]);
+  const scheduledByDay = weekDays.map((day) => sessions.filter((session) => session.date === isoDate(day)));
   const nextTask = visibleAssignments.filter((item) => !item.done && daysBetween(today, item.dueDate) >= 0).sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0];
+  const todaySessions = sessions.filter((session) => session.date === isoDate(today) && !session.isDue && !session.assignment.done);
+  const todayMinutes = todaySessions.reduce((sum, session) => sum + session.minutes, 0);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("courseflow-data-v2");
-    if (saved) { try { const data = JSON.parse(saved); setCourses(data.courses); setAssignments(data.assignments); setSelectedCourse(data.courses[0]?.id || ""); } catch {} }
+    if (saved) { try { const data = JSON.parse(saved); setCourses(data.courses); setAssignments(data.assignments.map((item: Assignment) => ({ ...item, kind: item.kind || inferKind(item.title) }))); setSessionPlans(data.sessionPlans || {}); setSelectedCourse(data.courses[0]?.id || ""); } catch {} }
   }, []);
-  useEffect(() => { window.localStorage.setItem("courseflow-data-v2", JSON.stringify({ courses, assignments })); }, [courses, assignments]);
+  useEffect(() => { window.localStorage.setItem("courseflow-data-v2", JSON.stringify({ courses, assignments, sessionPlans })); }, [courses, assignments, sessionPlans]);
   useEffect(() => {
     const context = document.modelContext;
     if (!context?.registerTool) return;
@@ -112,7 +139,7 @@ export default function Home() {
       execute(input: unknown) {
         const value = input as { title?: string; courseId?: string; difficulty?: Difficulty; dueDate?: string };
         if (!value.title || !value.courseId || !courseMap[value.courseId] || !value.difficulty || !(value.difficulty in leadDays) || !value.dueDate || Number.isNaN(new Date(`${value.dueDate}T00:00:00`).getTime())) throw new Error("Invalid assignment details");
-        const item = { id: Date.now(), title: value.title, courseId: value.courseId, difficulty: value.difficulty, dueDate: value.dueDate } as Assignment;
+        const item = { id: Date.now(), title: value.title, courseId: value.courseId, difficulty: value.difficulty, dueDate: value.dueDate, kind: inferKind(value.title) } as Assignment;
         setAssignments((items) => [...items, item]);
         return { status: "added", title: item.title, course: courseMap[item.courseId].code, startDate: addDays(new Date(`${item.dueDate}T00:00:00`), -leadDays[item.difficulty]).toISOString().slice(0, 10) };
       },
@@ -208,18 +235,31 @@ export default function Home() {
     const id = `${(courseCode || courseName).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now()}`;
     const colors = palette[courses.length % palette.length];
     setCourses((items) => [...items, { id, code: courseCode.trim() || courseName.trim().slice(0, 12), name: courseName.trim(), source: sourceName, ...colors }]);
-    setAssignments((items) => [...items, ...included.map((item, index) => ({ id: Date.now() + index, courseId: id, title: item.title, dueDate: item.dueDate, difficulty: item.difficulty }))]);
+    setAssignments((items) => [...items, ...included.map((item, index) => ({ id: Date.now() + index, courseId: id, title: item.title, dueDate: item.dueDate, difficulty: item.difficulty, kind: inferKind(item.title) }))]);
     setSelectedCourse(id); setActiveCourse(id); resetImport(false);
   }
 
   function addAssignment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const data = new FormData(event.currentTarget);
-    setAssignments((items) => [...items, { id: Date.now(), title: String(data.get("title")), courseId: selectedCourse, dueDate: String(data.get("due")), difficulty }]);
+    setAssignments((items) => [...items, { id: Date.now(), title: String(data.get("title")), courseId: selectedCourse, dueDate: String(data.get("due")), difficulty, kind: assignmentKind }]);
     setAssignmentOpen(false);
   }
 
   function toggleDone(id: number) { setAssignments((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item)); }
   function updateDraft(id: string, changes: Partial<ParsedAssignment>) { setDraftItems((items) => items.map((item) => item.id === id ? { ...item, ...changes } : item)); }
+  function moveSession(targetDate: string) {
+    if (!draggedSession) return;
+    const item = assignments.find((assignment) => assignment.id === draggedSession.assignmentId);
+    if (!item || targetDate >= item.dueDate) { setDraggedSession(null); setDropDay(null); return; }
+    const current = sessionPlans[String(item.id)] || defaultSessionDates(item);
+    const remaining = current.filter((date) => date >= draggedSession.date).length;
+    const target = new Date(`${targetDate}T00:00:00`);
+    const lastWorkDay = addDays(new Date(`${item.dueDate}T00:00:00`), -1);
+    const kept = current.filter((date) => date < draggedSession.date && date !== targetDate);
+    const rebalanced = spreadDates(target, lastWorkDay, remaining);
+    setSessionPlans((plans) => ({ ...plans, [String(item.id)]: Array.from(new Set([...kept, ...rebalanced])).sort() }));
+    setDraggedSession(null); setDropDay(null);
+  }
 
   return (
     <main className="min-h-screen bg-[#f6f7fb] text-[#17203b]">
@@ -252,7 +292,7 @@ export default function Home() {
 
             <Dialog open={assignmentOpen} onOpenChange={setAssignmentOpen}>
               <DialogTrigger asChild><Button disabled={!courses.length} className="h-10 rounded-xl bg-[#6b5cff] px-3 shadow-[0_7px_16px_rgba(107,92,255,.22)] hover:bg-[#5d4fe8] sm:px-4"><CirclePlus /><span className="hidden sm:inline">Add assignment</span></Button></DialogTrigger>
-              <DialogContent className="rounded-2xl border-[#dfe3ed] bg-white sm:max-w-[460px]"><form onSubmit={addAssignment} className="contents"><DialogHeader><DialogTitle className="font-display text-2xl">Add an assignment</DialogTitle><DialogDescription>Courseflow will place it on your plan automatically.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><div className="grid gap-2"><Label htmlFor="title">Assignment</Label><Input id="title" name="title" placeholder="e.g. Literature review" required /></div><div className="grid gap-2 sm:grid-cols-2"><div className="grid gap-2"><Label>Course</Label><Select value={selectedCourse} onValueChange={setSelectedCourse}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{courses.map((item) => <SelectItem key={item.id} value={item.id}>{item.code}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-2"><Label>Difficulty</Label><Select value={difficulty} onValueChange={(value) => setDifficulty(value as Difficulty)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="easy">Easy · 2 days</SelectItem><SelectItem value="medium">Medium · 4 days</SelectItem><SelectItem value="hard">Hard · 7 days</SelectItem></SelectContent></Select></div></div><div className="grid gap-2"><Label htmlFor="due">Due date</Label><Input id="due" name="due" type="date" required /></div></div><DialogFooter><DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose><Button type="submit" className="bg-[#6b5cff] hover:bg-[#5d4fe8]">Build my plan</Button></DialogFooter></form></DialogContent>
+              <DialogContent className="rounded-2xl border-[#dfe3ed] bg-white sm:max-w-[500px]"><form onSubmit={addAssignment} className="contents"><DialogHeader><DialogTitle className="font-display text-2xl">Add work to your plan</DialogTitle><DialogDescription>Assignments get work sessions. Exams get recurring study sessions.</DialogDescription></DialogHeader><div className="grid gap-4 py-2"><div className="grid gap-2"><Label>Type</Label><Select value={assignmentKind} onValueChange={(value) => setAssignmentKind(value as AssignmentKind)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="assignment">Assignment or project</SelectItem><SelectItem value="exam">Exam or quiz</SelectItem></SelectContent></Select></div><div className="grid gap-2"><Label htmlFor="title">Name</Label><Input id="title" name="title" placeholder={assignmentKind === "exam" ? "e.g. Midterm exam" : "e.g. Literature review"} required /></div><div className="grid gap-2 sm:grid-cols-2"><div className="grid gap-2"><Label>Course</Label><Select value={selectedCourse} onValueChange={setSelectedCourse}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent>{courses.map((item) => <SelectItem key={item.id} value={item.id}>{item.code}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-2"><Label>Difficulty</Label><Select value={difficulty} onValueChange={(value) => setDifficulty(value as Difficulty)}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="easy">Easy</SelectItem><SelectItem value="medium">Medium</SelectItem><SelectItem value="hard">Hard</SelectItem></SelectContent></Select></div></div><div className="grid gap-2"><Label htmlFor="due">{assignmentKind === "exam" ? "Exam date" : "Due date"}</Label><Input id="due" name="due" type="date" required /></div></div><DialogFooter><DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose><Button type="submit" className="bg-[#6b5cff] hover:bg-[#5d4fe8]">Build my plan</Button></DialogFooter></form></DialogContent>
             </Dialog>
           </div>
         </div>
@@ -265,13 +305,14 @@ export default function Home() {
             <button onClick={() => setActiveCourse("all")} className={`course-filter ${activeCourse === "all" ? "active" : ""}`}><span className="grid size-8 place-items-center rounded-lg bg-[#edf0f8] text-[#34416b]"><BookOpen className="size-4" /></span><span className="whitespace-nowrap text-left"><strong>All courses</strong><small>{assignments.filter((item) => daysBetween(today, item.dueDate) >= 0).length} upcoming</small></span></button>
             {courses.map((item) => <button key={item.id} onClick={() => setActiveCourse(item.id)} className={`course-filter ${activeCourse === item.id ? "active" : ""}`}><span className="size-3 rounded-full" style={{ background: item.color }} /><span className="whitespace-nowrap text-left"><strong>{item.code}</strong><small>{item.name}</small></span></button>)}
           </div>
-          <div className="mt-4 hidden border-t border-[#e8eaf0] px-2 pt-5 lg:block"><div className="rounded-xl bg-[#f2f0ff] p-4"><div className="mb-2 flex items-center gap-2 font-semibold text-[#5749d7]"><Sparkles className="size-4" /> Smart timing</div><p className="text-sm leading-5 text-[#666f89]">Easy work starts 2 days early. Medium starts 4 days early. Hard starts 7 days early.</p></div></div>
+          <div className="mt-4 hidden border-t border-[#e8eaf0] px-2 pt-5 lg:block"><div className="rounded-xl bg-[#f2f0ff] p-4"><div className="mb-2 flex items-center gap-2 font-semibold text-[#5749d7]"><Sparkles className="size-4" /> Smart timing</div><p className="text-sm leading-5 text-[#666f89]">Assignments begin 2–7 days early. Exams become recurring study sessions up to 2 weeks ahead.</p></div></div>
         </aside>
 
         <section className="min-w-0">
           <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="mb-1 text-sm font-semibold text-[#6b5cff]">{dateLabel(today)}</p><h1 className="font-display text-[clamp(1.9rem,4vw,3.2rem)] font-bold leading-none tracking-[-.045em]">Your week, mapped out.</h1></div><div className="flex items-center gap-2 self-start rounded-xl border border-[#dfe3ed] bg-white p-1 shadow-sm sm:self-auto"><button aria-label="Previous week" onClick={() => setWeekOffset((value) => value - 1)} className="nav-button"><ChevronLeft /></button><button onClick={() => setWeekOffset(0)} className="px-2 text-sm font-bold">{weekOffset === 0 ? "Next 7 days" : dateLabel(weekDays[0])}</button><button aria-label="Next week" onClick={() => setWeekOffset((value) => value + 1)} className="nav-button"><ChevronRight /></button></div></div>
-          {weekOffset === 0 && nextTask && courseMap[nextTask.courseId] && <div className="mb-5 grid gap-4 overflow-hidden rounded-2xl bg-[#1b2a5b] p-5 text-white shadow-[0_16px_45px_rgba(27,42,91,.2)] sm:grid-cols-[1fr_auto] sm:items-center sm:p-6"><div><p className="mb-2 flex items-center gap-2 text-sm font-semibold text-[#b9c4ef]"><Clock3 className="size-4" /> Best thing to work on now</p><h2 className="font-display text-2xl font-bold tracking-[-.02em]">{nextTask.title}</h2><p className="mt-1 text-sm text-[#c8d0eb]">{courseMap[nextTask.courseId].code} · {effort[nextTask.difficulty]} today keeps you ahead.</p></div><button onClick={() => toggleDone(nextTask.id)} className="flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-bold text-[#1b2a5b] transition hover:bg-[#f0f2fb]">Mark complete <ArrowRight className="size-4" /></button></div>}
-          <div className="calendar-shell"><div className="calendar-grid min-w-[820px]">{weekDays.map((day, index) => <div key={day.toISOString()} className={`day-column ${weekOffset === 0 && index === 0 ? "today" : ""}`}><div className="day-heading"><span>{dayLabel(day)}</span><strong>{day.getDate()}</strong>{weekOffset === 0 && index === 0 && <small>Today</small>}</div><div className="min-h-[430px] space-y-3 p-2.5">{scheduledByDay[index].map((item) => { const courseInfo = courseMap[item.courseId]; if (!courseInfo) return null; const absoluteOffset = weekOffset * 7 + index; const dueOffset = daysBetween(today, item.dueDate); const isDue = absoluteOffset === dueOffset; const isStart = absoluteOffset === dueOffset - leadDays[item.difficulty]; return <article key={item.id} className={`assignment-card ${item.done ? "done" : ""}`} style={{ "--course": courseInfo.color, "--course-soft": courseInfo.soft } as React.CSSProperties}><div className="mb-2 flex items-center justify-between gap-1"><span className="course-code">{courseInfo.code}</span><Checkbox checked={item.done} onCheckedChange={() => toggleDone(item.id)} aria-label={`Mark ${item.title} complete`} className="border-[#c8cede] data-[state=checked]:border-[var(--course)] data-[state=checked]:bg-[var(--course)]" /></div><h3>{item.title}</h3><p>{isDue ? `Due ${dateLabel(new Date(`${item.dueDate}T00:00:00`))}` : isStart ? "Start today" : "Work session"}</p><div className="mt-3 flex gap-1">{Array.from({ length: leadDays[item.difficulty] + 1 }, (_, step) => <span key={step} className="h-1 flex-1 rounded-full bg-[var(--course)]" style={{ opacity: step <= absoluteOffset - (dueOffset - leadDays[item.difficulty]) ? 1 : .18 }} />)}</div></article>; })}{scheduledByDay[index].length === 0 && <div className="grid min-h-28 place-items-center rounded-xl border border-dashed border-[#dfe3ed] text-sm font-medium text-[#a0a7b7]">Open space</div>}</div></div>)}</div></div>
+          {weekOffset === 0 && <section className="today-dashboard mb-5" aria-labelledby="today-heading"><div className="today-summary"><p className="eyebrow"><Clock3 className="size-4" /> Today</p><h2 id="today-heading">{todaySessions.length ? `${todaySessions.length} focused session${todaySessions.length === 1 ? "" : "s"}` : "You’re clear for today"}</h2><p>{todaySessions.length ? `${formatMinutes(todayMinutes)} planned across ${new Set(todaySessions.map((session) => session.assignment.courseId)).size} course${new Set(todaySessions.map((session) => session.assignment.courseId)).size === 1 ? "" : "s"}.` : "No scheduled work sessions. Use the open space or work ahead."}</p><div className="today-metrics"><span><Timer className="size-4" /> {formatMinutes(todayMinutes)}</span>{nextTask && courseMap[nextTask.courseId] && <span><Trophy className="size-4" /> Next: {nextTask.title} · {dateLabel(new Date(`${nextTask.dueDate}T00:00:00`))}</span>}</div></div><div className="today-list">{todaySessions.slice(0, 3).map((session) => { const course = courseMap[session.assignment.courseId]; return course ? <button key={session.id} onClick={() => toggleDone(session.assignment.id)} className="today-task"><span className="today-dot" style={{ background: course.color }} /><span><strong>{session.assignment.title}</strong><small>{course.code} · {formatMinutes(session.minutes)} · {session.assignment.kind === "exam" ? "Study" : "Work"} {session.step} of {session.total}</small></span><ArrowRight className="ml-auto size-4" /></button> : null; })}{!todaySessions.length && <div className="today-empty"><Sparkles className="size-5" /> Nothing urgent—nice work.</div>}</div></section>}
+          <div className="mb-3 flex items-center justify-between gap-3"><p className="text-sm font-semibold text-[#68728c]">Drag a session to another day; later sessions rebalance automatically.</p>{draggedSession && <span className="rounded-full bg-[#eeeaff] px-3 py-1 text-xs font-bold text-[#5749d7]">Choose a new day</span>}</div>
+          <div className="calendar-shell"><div className="calendar-grid min-w-[820px]">{weekDays.map((day, index) => { const dayIso = isoDate(day); return <div key={day.toISOString()} onDragOver={(event) => { event.preventDefault(); setDropDay(dayIso); }} onDragLeave={() => setDropDay((value) => value === dayIso ? null : value)} onDrop={(event) => { event.preventDefault(); moveSession(dayIso); }} className={`day-column ${weekOffset === 0 && index === 0 ? "today" : ""} ${dropDay === dayIso ? "drop-target" : ""}`}><div className="day-heading"><span>{dayLabel(day)}</span><strong>{day.getDate()}</strong>{weekOffset === 0 && index === 0 && <small>Today</small>}</div><div className="min-h-[430px] space-y-3 p-2.5">{scheduledByDay[index].map((session) => { const item = session.assignment; const courseInfo = courseMap[item.courseId]; if (!courseInfo) return null; const isExam = (item.kind || inferKind(item.title)) === "exam"; return <article key={session.id} draggable={!session.isDue && !item.done} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; setDraggedSession({ assignmentId: item.id, date: session.date }); }} onDragEnd={() => { setDraggedSession(null); setDropDay(null); }} className={`assignment-card ${item.done ? "done" : ""} ${session.isDue ? "deadline-card" : ""} ${isExam ? "exam-card" : ""}`} style={{ "--course": courseInfo.color, "--course-soft": courseInfo.soft } as React.CSSProperties}><div className="mb-2 flex items-center justify-between gap-1"><span className="course-code">{courseInfo.code}</span>{session.isDue ? <Checkbox checked={item.done} onCheckedChange={() => toggleDone(item.id)} aria-label={`Mark ${item.title} complete`} className="border-[#c8cede] data-[state=checked]:border-[var(--course)] data-[state=checked]:bg-[var(--course)]" /> : <GripVertical className="drag-handle size-4" aria-hidden="true" />}</div><h3>{item.title}</h3><p>{session.isDue ? `${isExam ? "Exam" : "Due"} ${dateLabel(new Date(`${item.dueDate}T00:00:00`))}` : `${isExam ? "Study" : "Work"} ${session.step} of ${session.total} · ${formatMinutes(session.minutes)}`}</p>{!session.isDue && <div className="mt-3 flex gap-1">{Array.from({ length: session.total }, (_, step) => <span key={step} className="h-1 flex-1 rounded-full bg-[var(--course)]" style={{ opacity: step < session.step ? 1 : .18 }} />)}</div>}</article>; })}{scheduledByDay[index].length === 0 && <div className="grid min-h-28 place-items-center rounded-xl border border-dashed border-[#dfe3ed] text-sm font-medium text-[#a0a7b7]">Open space</div>}</div></div>; })}</div></div>
           <p className="mt-3 text-center text-sm text-[#7e879f] lg:hidden">Swipe sideways to see the full week.</p>
         </section>
       </div>
